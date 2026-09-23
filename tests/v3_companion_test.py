@@ -1,4 +1,5 @@
 """Companion regression scenarios: installed package, rich context, and user data."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,10 @@ import zipfile
 
 ROOT = Path(os.environ.get('BEYIN_TEST_REPO', Path(__file__).resolve().parents[1]))
 COMPANION = '🔮 850-Companion'
+_spec = importlib.util.spec_from_file_location(
+    'beyin_v3_companion_directory', ROOT / 'template/.claude/scripts/beyin_v3_companion.py')
+companion_script = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(companion_script)
 
 
 class CompanionTest(unittest.TestCase):
@@ -41,6 +46,23 @@ class CompanionTest(unittest.TestCase):
         output = self.run_cli(ROOT / 'template/.claude/scripts/beyin_v3_hook.py',
                               '--vault', self.vault, '--state', self.state, '--harness', harness, payload=payload)
         return output.get('hookSpecificOutput', {}).get('additionalContext', '') if harness != 'antigravity' else output.get('injectSteps', [{}])[0].get('ephemeralMessage', '')
+
+    def test_directory_recognizes_companion_name_variants_without_false_fallbacks(self):
+        cases = (
+            ('trailing emoji', '850-Companion 🔮', ('Last-Session.md',), '850-Companion 🔮'),
+            ('exact default', COMPANION, (), COMPANION),
+            ('echo suffix', 'session echo', (), 'session echo'),
+            ('unrelated directory', 'unrelated', (), COMPANION),
+            ('archive directory', 'memory Archive', ('Core.md',), COMPANION),
+        )
+        for label, folder, files, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory(prefix='directory-regression-') as name:
+                vault = Path(name)
+                target = vault / folder
+                target.mkdir()
+                for filename in files:
+                    (target / filename).write_bytes(b'candidate')
+                self.assertEqual(companion_script.directory(vault), vault / expected)
 
     def seed(self, folder=COMPANION):
         directory = self.vault / folder; directory.mkdir(exist_ok=True)

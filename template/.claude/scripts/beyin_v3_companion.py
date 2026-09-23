@@ -24,7 +24,10 @@ def directory(vault):
         if (path.name.startswith('.') or path.is_symlink() or not path.is_dir() or
                 re.search(r'(?i)(archive|arşiv|arsiv)', path.name)):
             continue
-        if path.name == DEFAULT_DIRECTORY or path.name.casefold().endswith(('companion', 'echo')):
+        # A trailing emoji or mark (`850-Companion 🔮`) must not hide the name;
+        # otherwise a second default identity directory is created beside it.
+        stem = re.sub(r'[\W_]+$', '', path.name.casefold())
+        if path.name == DEFAULT_DIRECTORY or stem.endswith(('companion', 'echo')):
             named.append(path)
         elif any((path / name).is_file() for name in ('Core.md', 'Soul.md')):
             candidates.append(path)
