@@ -57,7 +57,7 @@ class CompanionTest(unittest.TestCase):
         )
         for label, folder, files, expected in cases:
             with self.subTest(label=label), tempfile.TemporaryDirectory(prefix='directory-regression-') as name:
-                vault = Path(name)
+                vault = Path(name).resolve()
                 target = vault / folder
                 target.mkdir()
                 for filename in files:
