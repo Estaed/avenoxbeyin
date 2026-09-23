@@ -109,6 +109,10 @@ def _yaml_sequence(value):
 
 def parse(text):
     """JSON frontmatter or deliberately bounded flat scalar/list YAML."""
+    # Windows editors and PowerShell 5.1 `Set-Content -Encoding UTF8` start files
+    # with a UTF-8 BOM; str.strip() keeps it, so the opening fence was missed and
+    # the metadata silently became body text.
+    text = text.removeprefix('\ufeff')
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != '---':
         return {}, text

@@ -395,6 +395,33 @@ class SourceSyncTest(unittest.TestCase):
             with self.subTest(newline=label):
                 self._assert_block_list_task_update(newline)
 
+    def test_utf8_bom_frontmatter_sync_matches_plain_source_for_lf_and_crlf(self):
+        metadata = {'id': 'task-bom', 'kind': 'task', 'status': 'open', 'project': 'nebula'}
+        body = 'BOM task body only.\n'
+        header = json.dumps(metadata, ensure_ascii=False)
+        parsed_metadata, parsed_body = self.module.parse('\ufeff---\n{"title": "x"}\n---\nbody')
+        self.assertEqual(parsed_metadata, {'title': 'x'})
+        self.assertEqual(parsed_body, 'body')
+
+        for label, newline in (('LF', '\n'), ('CRLF', '\r\n')):
+            with self.subTest(newline=label):
+                source = self.vault / 'task-bom.md'
+                frontmatter = ('---\n' + header + '\n---\n').replace('\n', newline).encode('utf-8')
+                body_bytes = body.replace('\n', newline).encode('utf-8')
+                source.write_bytes(b'\xef\xbb\xbf' + frontmatter + body_bytes)
+                self.assertEqual(self.engine.sync()['status'], 'succeeded')
+                bom_record = self.engine.store.retrieve('BOM task body', project='nebula')['records'][0]
+                self.assertEqual({key: bom_record[key] for key in ('id', 'kind', 'status')},
+                                 {key: metadata[key] for key in ('id', 'kind', 'status')})
+                self.assertEqual(bom_record['text'], body.replace('\n', newline))
+                self.assertNotIn('task-bom', bom_record['text'])
+
+                source.write_bytes(frontmatter + body_bytes)
+                self.assertEqual(self.engine.sync()['status'], 'succeeded')
+                plain_record = self.engine.store.retrieve('BOM task body', project='nebula')['records'][0]
+                for key in ('id', 'kind', 'status', 'text'):
+                    self.assertEqual(bom_record[key], plain_record[key])
+
     def _assert_block_list_task_update(self, newline):
         body = '# Nebula calibration\n\n- Keep exact prose.\n  Unicode: ölçüm 🔭\n'.replace('\n', newline)
         header = ('id: yaml-task\nkind: task\nrevision: 1\nproject: nebula\nstatus: active\n'
