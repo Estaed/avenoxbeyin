@@ -8,9 +8,9 @@ import tempfile
 import time
 
 PROFILES = {
-    'normal': dict(auto_sync=True, interval_minutes=0, context_mode='turn', context_chars=5000, secret_filter=False),
-    'economical': dict(auto_sync=True, interval_minutes=15, context_mode='session', context_chars=2000, secret_filter=False),
-    'manual': dict(auto_sync=False, interval_minutes=15, context_mode='off', context_chars=2000, secret_filter=False),
+    'normal': dict(auto_sync=True, interval_minutes=0, context_mode='turn', context_chars=5000, secret_filter=False, excluded_components=[]),
+    'economical': dict(auto_sync=True, interval_minutes=15, context_mode='session', context_chars=2000, secret_filter=False, excluded_components=[]),
+    'manual': dict(auto_sync=False, interval_minutes=15, context_mode='off', context_chars=2000, secret_filter=False, excluded_components=[]),
 }
 
 
@@ -27,6 +27,9 @@ def validate(value):
             raise ValueError(f'{key} must be an integer between {low} and {high}')
     if result['context_mode'] not in ('turn', 'session', 'off'):
         raise ValueError('context_mode must be turn, session or off')
+    if not isinstance(result.get('excluded_components', []), (list, tuple)) or not all(isinstance(x, str) for x in result.get('excluded_components', [])):
+        raise ValueError('excluded_components must be a list of strings')
+    result['excluded_components'] = sorted(set(result.get('excluded_components', [])))
     return result
 
 
@@ -47,7 +50,8 @@ def save(vault, changes, profile=None):
     current = read(vault)
     # The secret filter is an independent safety choice; changing performance
     # profiles must not silently enable or disable it.
-    base = dict(PROFILES[profile], secret_filter=current['secret_filter']) if profile else current
+    base = dict(PROFILES[profile], secret_filter=current['secret_filter'],
+                excluded_components=current.get('excluded_components', [])) if profile else current
     result = validate(dict(base, **changes))
     path = preferences_path(vault)
     fd, temporary = tempfile.mkstemp(prefix='.beyin-preferences-', dir=path.parent)

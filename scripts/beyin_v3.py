@@ -121,6 +121,10 @@ def parser():
     settings.add_argument("--update-notifications", choices=("on", "off"))
     settings.add_argument("--last-session-chars", type=int, help="Hygiene limit for Last-Session.md; 0 turns it off")
     settings.add_argument("--threads-chars", type=int, help="Hygiene limit for Threads.md; 0 turns it off")
+    settings.add_argument("--exclude-component", action="append", default=[], metavar="COMPONENT",
+                          help="Disable/exclude a managed component or skill (repeatable)")
+    settings.add_argument("--include-component", action="append", default=[], metavar="COMPONENT",
+                          help="Re-enable a previously excluded component (repeatable)")
     compact = sub.add_parser("companion-compact", help="Move older Last-Session/Threads entries verbatim into a private archive; deletes nothing")
     compact.add_argument("--dry-run", action="store_true", help="Report what would move without writing")
     skill = sub.add_parser("skill-import", help="Import one explicitly chosen skill directory")
@@ -211,6 +215,11 @@ def main(argv=None):
                 changes['auto_sync'] = args.auto_sync == 'on'
             if args.secret_filter is not None:
                 changes['secret_filter'] = args.secret_filter == 'on'
+            if args.exclude_component or args.include_component:
+                current_excluded = set(preferences.read(vault).get('excluded_components', []))
+                current_excluded.update(args.exclude_component)
+                current_excluded.difference_update(args.include_component)
+                changes['excluded_components'] = sorted(current_excluded)
             settings = preferences.save(vault, changes, args.profile) if changes or args.profile else preferences.read(vault)
             result = {'status': 'saved' if changes or args.profile else 'current', 'preferences': settings,
                       'model_calls': False, 'timer_installed': False}
@@ -251,7 +260,9 @@ def main(argv=None):
             result['lifecycle'] = {name: {'status': 'observed_metadata' if events else 'never_seen', 'events': sorted(events)} for name, events in seen.items()}
             result['legacy_external_schedules'] = 'not_inspected; review custom OS/compiler schedules before migration'
             manifest = state / 'v3-install.json'
-            result['kept_legacy_runners'] = json.loads(manifest.read_text(encoding='utf-8')).get('kept_legacy', []) if manifest.exists() else []
+            manifest_data = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else {}
+            result['kept_legacy_runners'] = manifest_data.get('kept_legacy', [])
+            result['excluded_components'] = manifest_data.get('excluded_components', [])
             load_sync()
             import beyin_v3_preferences as preferences
             result['preferences'] = preferences.read(vault)

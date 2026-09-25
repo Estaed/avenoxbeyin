@@ -56,6 +56,42 @@ def managed_handler(handler, previous, kept=()):
     return command in previous or "beyin_v3_hook.py" in command or legacy
 
 
+def is_component_excluded(target, excluded):
+    if not excluded:
+        return False
+    target = target.replace("\\", "/")
+    if target in excluded:
+        return True
+    for exc in excluded:
+        exc = exc.replace("\\", "/")
+        if exc == "skills" and (target.startswith(".agents/skills/") or target.startswith(".claude/skills/")):
+            return True
+        if exc.startswith("skills/"):
+            skill = exc.split("/", 1)[1]
+            if target == skill or target in (f".agents/skills/{skill}/SKILL.md", f".claude/skills/{skill}/SKILL.md"):
+                return True
+            if target.startswith(f".agents/skills/{skill}/") or target.startswith(f".claude/skills/{skill}/"):
+                return True
+        if exc in ("beyin", "beyin-doktor", "beyin-guncelle"):
+            if target == f"skills/{exc}" or target in (f".agents/skills/{exc}/SKILL.md", f".claude/skills/{exc}/SKILL.md"):
+                return True
+            if target.startswith(f".agents/skills/{exc}/") or target.startswith(f".claude/skills/{exc}/"):
+                return True
+        if exc == "adapters" and (target.startswith("adapters/") or target.startswith(".hermes/plugins/") or target.startswith(".opencode/plugins/") or target.startswith(".omp/hooks/")):
+            return True
+        if exc == "adapters/hermes" and (target == "adapters/hermes" or target.startswith(".hermes/plugins/")):
+            return True
+        if exc == "adapters/opencode" and (target == "adapters/opencode" or target.startswith(".opencode/plugins/")):
+            return True
+        if exc == "adapters/omp" and (target == "adapters/omp" or target.startswith(".omp/hooks/")):
+            return True
+        if exc == "launchers" and (target == "launchers" or target.startswith("Beyni G") or target.startswith("Beyni Guncelle") or target.startswith("Beyni Güncelle")):
+            return True
+        if exc == "agents_block" and target in ("agents_block", "AGENTS.md", "CLAUDE.md"):
+            return True
+    return False
+
+
 def atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=".beyin-install-")
@@ -158,7 +194,7 @@ def semantic_unchanged(name, baseline, current, previous, kept=()):
 
 def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", legacy_hashes=None,
              legacy_skill_hashes=None, migration=None, migration_plan=None, accept_customized=(),
-             keep_customized=()):
+             keep_customized=(), exclude_components=(), include_components=()):
     vault, state = vault.resolve(), state.resolve()
     if not vault.is_dir() or state == vault or vault in state.parents:
         raise ValueError("Existing vault and state outside vault required")
@@ -229,8 +265,21 @@ def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", le
     kept = sorted(user_owned - set(accept_customized))
     if migration_plan is not None and (kept or 'kept_legacy' in migration_plan):
         migration_plan['kept_legacy'] = kept
+    user_excluded = set(manifest.get('excluded_components', [])) | set(exclude_components)
+    pref_path = vault / '.beyin-preferences.json'
+    if pref_path.exists():
+        try:
+            pref_data = json.loads(pref_path.read_text(encoding='utf-8'))
+            if isinstance(pref_data.get('excluded_components'), (list, tuple)):
+                user_excluded |= set(pref_data['excluded_components'])
+        except Exception:
+            pass
+    if include_components:
+        user_excluded -= set(include_components)
 
     def add(name, content):
+        if is_component_excluded(name, user_excluded):
+            return
         path = (vault / name).resolve()
         if path != vault and vault not in path.parents:
             raise ValueError("Managed destination escapes vault")
@@ -304,6 +353,10 @@ def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", le
                     cleaned.append(dict(group, hooks=remaining))
             hooks[event] = cleaned
         posix, windows = commands([sys.executable, hook, "--vault", vault, "--state", state, "--harness", harness])
+        if is_component_excluded(f"harnesses/{harness}", user_excluded):
+            if path.exists():
+                add(name, jbytes(data))
+            continue
         for event in ("SessionStart", "UserPromptSubmit", "Stop", "PostToolUse", "PreCompact", "SessionEnd"):
             timeout = 3 if event == "SessionEnd" else (20 if os.name == "nt" else 5)
             handler = {"type": "command", "command": windows if os.name == "nt" else posix, "timeout": timeout}
@@ -326,24 +379,30 @@ def _install(vault, state, uninstall=False, plan_only=False, version="3.0.0", le
     path = vault / ".agents/hooks.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     data.pop("avenox-beyin", None)
-    managed = {}
-    for event in ("PreInvocation", "Stop"):
-        posix, windows = commands([sys.executable, hook, "--vault", vault, "--state", state, "--harness", "antigravity", "--event", event])
-        managed[event] = [{"type": "command", "command": windows if os.name == "nt" else posix, "timeout": 20 if os.name == "nt" else 5}]
-    data["beyin-v3"] = managed
-    add(".agents/hooks.json", jbytes(data))
-    cfg = vault / ".codex/config.toml"
-    text = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
-    section = re.search(r"(?m)^\[features\]\s*$", text)
-    if section:
-        end = re.search(r"(?m)^\[", text[section.end():])
-        stop = section.end() + end.start() if end else len(text)
-        body = text[section.end():stop]
-        body = re.sub(r"(?m)^hooks\s*=.*$", "hooks = true", body) if re.search(r"(?m)^hooks\s*=", body) else "\nhooks = true\n" + body
-        text = text[:section.end()] + body + text[stop:]
+    if is_component_excluded("harnesses/antigravity", user_excluded):
+        data.pop("beyin-v3", None)
+        if path.exists():
+            add(".agents/hooks.json", jbytes(data))
     else:
-        text += "\n[features]\nhooks = true\n"
-    add(".codex/config.toml", text.encode())
+        managed = {}
+        for event in ("PreInvocation", "Stop"):
+            posix, windows = commands([sys.executable, hook, "--vault", vault, "--state", state, "--harness", "antigravity", "--event", event])
+            managed[event] = [{"type": "command", "command": windows if os.name == "nt" else posix, "timeout": 20 if os.name == "nt" else 5}]
+        data["beyin-v3"] = managed
+        add(".agents/hooks.json", jbytes(data))
+    if not is_component_excluded("harnesses/codex", user_excluded):
+        cfg = vault / ".codex/config.toml"
+        text = cfg.read_text(encoding="utf-8") if cfg.exists() else ""
+        section = re.search(r"(?m)^\[features\]\s*$", text)
+        if section:
+            end = re.search(r"(?m)^\[", text[section.end():])
+            stop = section.end() + end.start() if end else len(text)
+            body = text[section.end():stop]
+            body = re.sub(r"(?m)^hooks\s*=.*$", "hooks = true", body) if re.search(r"(?m)^hooks\s*=", body) else "\nhooks = true\n" + body
+            text = text[:section.end()] + body + text[stop:]
+        else:
+            text += "\n[features]\nhooks = true\n"
+        add(".codex/config.toml", text.encode())
     cli_argv = [str(sys.executable), str(vault / ".claude/scripts/beyin_v3_cli.py"), "--vault", str(vault), "--state", str(state), "sync"]
     cli_command = ("& " + " ".join("'" + value.replace("'", "''") + "'" for value in cli_argv)) if os.name == "nt" else shlex.join(cli_argv)
     block = f"""{START}
@@ -387,23 +446,32 @@ Local checks make no model calls. The V2 background compiler is retired; the act
 now performs source-linked reflection and knowledge synthesis. Receipt indexes alone are
 not knowledge synthesis.
 {END}"""
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        path = vault / name
-        text = path.read_text(encoding="utf-8") if path.exists() else ""
-        if name == "CLAUDE.md":
-            # A CLAUDE.md symlinked to AGENTS.md was already planned through AGENTS.md.
-            if path.resolve() == (vault / "AGENTS.md").resolve(): continue
-            item = manifest["files"].get(name)
-            outside = re.sub(r"\n*" + re.escape(START) + r".*?" + re.escape(END), "", text, flags=re.S)
-            # Absent, or the block-only file an earlier install created (an edited block still conflicts below).
-            if not path.exists() or (item is not None and item["original"] is None and not outside.strip()):
-                add(name, CLAUDE_IMPORT)
-                continue
-            if AGENTS_IMPORT.search(outside):
-                if item is not None or START in text: add(name, outside.encode())
-                continue
-        text = re.sub(re.escape(START) + r".*?" + re.escape(END), lambda _: block, text, flags=re.S) if START in text else text.rstrip() + "\n\n" + block + "\n"
-        add(name, text.encode())
+    if is_component_excluded("agents_block", user_excluded):
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            path = vault / name
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            if START in text:
+                outside = re.sub(r"\n*" + re.escape(START) + r".*?" + re.escape(END), "", text, flags=re.S)
+                if outside != text:
+                    add(name, outside.encode())
+    else:
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            path = vault / name
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            if name == "CLAUDE.md":
+                # A CLAUDE.md symlinked to AGENTS.md was already planned through AGENTS.md.
+                if path.resolve() == (vault / "AGENTS.md").resolve(): continue
+                item = manifest["files"].get(name)
+                outside = re.sub(r"\n*" + re.escape(START) + r".*?" + re.escape(END), "", text, flags=re.S)
+                # Absent, or the block-only file an earlier install created (an edited block still conflicts below).
+                if not path.exists() or (item is not None and item["original"] is None and not outside.strip()):
+                    add(name, CLAUDE_IMPORT)
+                    continue
+                if AGENTS_IMPORT.search(outside):
+                    if item is not None or START in text: add(name, outside.encode())
+                    continue
+            text = re.sub(re.escape(START) + r".*?" + re.escape(END), lambda _: block, text, flags=re.S) if START in text else text.rstrip() + "\n\n" + block + "\n"
+            add(name, text.encode())
     for name in planned:
         item = manifest["files"].get(name)
         path = vault / name
@@ -418,11 +486,25 @@ not knowledge synthesis.
             legacy = digest(current) in legacy_skill_hashes.get(name, []) or legacy_hashes.get(name) == digest(current)
             if not semantic and not legacy:
                 raise ValueError("Unmanaged file conflict " + name)
+    removed = {}
+    preserved_excluded = []
     next_manifest = json.loads(json.dumps(manifest))
+    for name, item in manifest.get("files", {}).items():
+        if name in planned:
+            continue
+        if is_component_excluded(name, user_excluded):
+            path = vault / name
+            current = path.read_bytes() if path.exists() else None
+            if current is not None:
+                if digest(current) == item["installed_hash"]:
+                    removed[name] = current
+                else:
+                    preserved_excluded.append(name)
+            next_manifest["files"].pop(name, None)
     for name, content in planned.items():
         path = vault / name
         old = path.read_bytes() if path.exists() else None
-        original = manifest["files"].get(name, {}).get("original", encode(old))
+        original = manifest.get("files", {}).get(name, {}).get("original", encode(old))
         next_manifest["files"][name] = {"original": original, "installed_hash": digest(content), "installed_content": encode(content)}
     next_manifest["commands"] = next_manifest.pop("new_commands", [])
     next_manifest["version"] = version
@@ -430,8 +512,12 @@ not knowledge synthesis.
         next_manifest["kept_legacy"] = kept
     else:
         next_manifest.pop("kept_legacy", None)
+    if user_excluded:
+        next_manifest["excluded_components"] = sorted(user_excluded)
+    else:
+        next_manifest.pop("excluded_components", None)
     if plan_only:
-        return {"planned": planned, "manifest": next_manifest, "modes": modes}
+        return {"planned": planned, "manifest": next_manifest, "modes": modes, "removed": removed, "preserved_excluded": preserved_excluded}
     spec = importlib.util.spec_from_file_location('beyin_install_transaction', ROOT / 'template/.claude/scripts/beyin_v3_update.py')
     updater = importlib.util.module_from_spec(spec); spec.loader.exec_module(updater)
     operations = []
@@ -442,6 +528,11 @@ not knowledge synthesis.
         operations.append({'scope':'vault','name':name,'old':encode(old),'new':encode(content),
                            'old_mode':stat.S_IMODE(path.stat().st_mode) if path.exists() else None,
                            'new_mode':modes.get(name,0o644)})
+    for name, old in removed.items():
+        path = vault / name
+        operations.append({'scope':'vault','name':name,'old':encode(old),'new':None,
+                           'old_mode':stat.S_IMODE(path.stat().st_mode) if path.exists() else None,
+                           'new_mode':None})
     operations.append({'scope':'state','name':'v3-install.json',
                        'old':encode(manifest_path.read_bytes() if manifest_path.exists() else None),
                        'new':encode(jbytes(next_manifest))})
@@ -461,9 +552,10 @@ not knowledge synthesis.
     from beyin_v3_companion import initialize
     companion = initialize(vault, state)
     return {'status':'installed','files':len(planned),'trust_review_required':True,'kept_legacy':kept,
+            'excluded_components': sorted(user_excluded),
             'companion': companion,
             'update_notice': 'New releases are checked on GitHub at most daily; notes are not sent. Disable with beyin.py preferences --update-notifications off.',
-            'skills':{'synced':['beyin','beyin-doktor','beyin-guncelle'],'conflicts':[], 'mode':'managed'}}
+            'skills':{'synced':[s for s in ('beyin','beyin-doktor','beyin-guncelle') if not is_component_excluded(f'skills/{s}', user_excluded)],'conflicts':[], 'mode':'managed'}}
 
 
 def package_defaults():
@@ -497,7 +589,8 @@ def package_defaults():
 
 
 def install(vault, state, uninstall=False, plan_only=False, version=None, legacy_hashes=None,
-            legacy_skill_hashes=None, accept_customized=(), keep_customized=()):
+            legacy_skill_hashes=None, accept_customized=(), keep_customized=(),
+            exclude_components=(), include_components=()):
     package = package_defaults()
     if package is not None:
         if version is not None and version != package['version']:
@@ -513,7 +606,8 @@ def install(vault, state, uninstall=False, plan_only=False, version=None, legacy
         version = version or '3.0.0'
     if plan_only or uninstall:
         return _install(vault, state, uninstall, plan_only, version, legacy_hashes, legacy_skill_hashes,
-                        accept_customized=accept_customized, keep_customized=keep_customized)
+                        accept_customized=accept_customized, keep_customized=keep_customized,
+                        exclude_components=exclude_components, include_components=include_components)
     directory = ROOT / 'template/.claude/scripts'
     if (Path(state).resolve() / 'update-journal.json').exists():
         spec = importlib.util.spec_from_file_location('beyin_install_recovery', directory / 'beyin_v3_update.py')
@@ -527,7 +621,8 @@ def install(vault, state, uninstall=False, plan_only=False, version=None, legacy
         with module.migration_guard(vault, state) as plan:
             return _install(vault, state, version=version, legacy_hashes=legacy_hashes,
                             legacy_skill_hashes=legacy_skill_hashes, migration=module, migration_plan=plan,
-                            accept_customized=accept_customized, keep_customized=keep_customized)
+                            accept_customized=accept_customized, keep_customized=keep_customized,
+                            exclude_components=exclude_components, include_components=include_components)
     finally:
         sys.path.remove(str(directory))
 
@@ -538,8 +633,11 @@ def plan_report(plan):
     return {"status": "plan", "version": plan["manifest"]["version"],
             "write": sorted(name for name in plan["planned"] if name not in retire),
             "retire": retire,
-            "preserve": sorted(name for name in plan["planned"] if files[name]["original"] is not None),
-            "keep": sorted(plan["manifest"].get("kept_legacy", []))}
+            "preserve": sorted(name for name in plan["planned"] if files.get(name, {}).get("original") is not None),
+            "keep": sorted(plan["manifest"].get("kept_legacy", [])),
+            "excluded": sorted(plan["manifest"].get("excluded_components", [])),
+            "removed": sorted(plan.get("removed", {}).keys()),
+            "preserved_excluded": sorted(plan.get("preserved_excluded", []))}
 
 
 def main():
@@ -553,6 +651,10 @@ def main():
                         help="retire one named customized legacy runner (vault-relative); repeatable")
     parser.add_argument("--keep-customized-legacy", action="append", default=[], metavar="PATH",
                         help="leave one named customized legacy runner and its hook entries untouched and unmanaged (vault-relative); repeatable")
+    parser.add_argument("--exclude-component", action="append", default=[], metavar="COMPONENT",
+                        help="disable/exclude a managed component, skill, adapter, or launcher; repeatable")
+    parser.add_argument("--include-component", action="append", default=[], metavar="COMPONENT",
+                        help="re-enable a previously excluded component; repeatable")
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location("beyin_cli_defaults", ROOT / "scripts/beyin_v3.py")
     defaults = importlib.util.module_from_spec(spec); spec.loader.exec_module(defaults)
@@ -562,7 +664,9 @@ def main():
         accepted = tuple(name.replace("\\", "/") for name in args.accept_customized_legacy)
         kept = tuple(name.replace("\\", "/") for name in args.keep_customized_legacy)
         result = install(args.vault, args.state or default_state(args.vault.resolve()), args.uninstall,
-                         plan_only=args.plan, accept_customized=accepted, keep_customized=kept)
+                         plan_only=args.plan, accept_customized=accepted, keep_customized=kept,
+                         exclude_components=tuple(args.exclude_component),
+                         include_components=tuple(args.include_component))
         print(json.dumps(plan_report(result) if args.plan else result))
     except Exception as exc:
         print(json.dumps({"error": type(exc).__name__, "message": str(exc)}), file=sys.stderr)
